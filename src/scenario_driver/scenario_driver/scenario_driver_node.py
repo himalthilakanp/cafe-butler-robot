@@ -86,11 +86,15 @@ class ScenarioDriver(Node):
         self.get_logger().info(f"Published order: {tables}")
 
     def schedule_cancel(self, table, delay):
-        self.create_timer(
-            delay,
-            lambda: self.publish_cancel(table),
-            callback_group=None
-        )
+        cancel_timer = None
+
+        def one_shot_cancel():
+            nonlocal cancel_timer
+            self.publish_cancel(table)
+            cancel_timer.cancel()
+
+        cancel_timer = self.create_timer(delay, one_shot_cancel)
+
 
     def publish_cancel(self, table):
         msg = String()
