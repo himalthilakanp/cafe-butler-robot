@@ -35,29 +35,27 @@ This node represents the AMR brain and FSM.
 
 ---
 
-### 2. Order Interface
-**Package:** `order_interface`  
-
-Publishes food orders to the robot using ROS 2 topics.
-
-**Topic:**
-- `/orders` (`std_msgs/String`)
-
-Example:
-table1
-table1,table2,table3
-
-yaml
-Copy code
-
----
-
-### 3. Scenario Driver (Auto Test Node)
+### 2. Scenario Driver (Auto Test Node)
 **Package:** `scenario_driver`  
 
 This node automatically validates all problem scenarios mentioned in the assessment.
 It behaves like a test harness and publishes orders and cancellations only when the robot
 returns to `IDLE_AT_HOME`.
+
+
+Example:
+table1
+table1,table2,table3
+
+
+---
+### 3. Order Interface
+**Package:** `order_interface`  
+
+Publishes food orders to the robot using ROS 2 topics(optional/manual)
+
+**Topic:**
+- `/orders` (`std_msgs/String`)
 
 ---
 
