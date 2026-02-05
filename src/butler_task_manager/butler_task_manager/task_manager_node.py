@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from example_interfaces.msg import String
+from std_msgs.msg import String
 from collections import deque
+
+
+TABLE_DWELL_SEC = 5.0
+HOME_RETURN_SEC = 4.0
 
 
 class ButlerTaskManager(Node):
     def __init__(self):
         super().__init__("butler_task_manager")
-        
+
         # Publisher
         self.status_publisher = self.create_publisher(
             String,
@@ -27,26 +31,20 @@ class ButlerTaskManager(Node):
         # Internal state
         self.current_status = "IDLE_AT_HOME"
         self.order_queue = deque()
+        self.current_table = None
 
-        # Timer to publish status
+        # Timers
         self.timer = self.create_timer(2.0, self.publish_status)
-        
-        # Movement simulation timer
         self.movement_timer = self.create_timer(1.0, self.handle_movement)
 
         self.state_start_time = self.get_clock().now()
 
         self.get_logger().info("Butler Task Manager started and waiting for orders")
 
-        self.current_table = None
-
-
-
     def order_callback(self, msg: String):
         self.get_logger().info(f"Order received: {msg.data}")
 
         tables = [t.strip() for t in msg.data.split(',') if t.strip()]
-
         if not tables:
             self.get_logger().warn("Received empty order")
             return
@@ -54,18 +52,17 @@ class ButlerTaskManager(Node):
         for table in tables:
             self.order_queue.append(table)
 
-        # Change state only if idle
         if self.current_status == "IDLE_AT_HOME":
             self.current_status = "GOING_TO_KITCHEN"
             self.state_start_time = self.get_clock().now()
             self.get_logger().info("State changed to GOING_TO_KITCHEN")
-
 
     def publish_status(self):
         msg = String()
         msg.data = f"{self.current_status} | Pending orders: {len(self.order_queue)}"
         self.status_publisher.publish(msg)
         self.get_logger().info(msg.data)
+
     def handle_movement(self):
         now = self.get_clock().now()
         elapsed = (now - self.state_start_time).nanoseconds / 1e9
@@ -77,13 +74,25 @@ class ButlerTaskManager(Node):
                 self.state_start_time = now
                 self.get_logger().info("Reached kitchen")
 
-        # At kitchen: decide next table
+        # At kitchen
         elif self.current_status == "AT_KITCHEN":
             if self.order_queue:
                 self.current_table = self.order_queue.popleft()
                 self.current_status = f"GOING_TO_{self.current_table.upper()}"
                 self.state_start_time = now
                 self.get_logger().info(f"Heading to {self.current_table}")
+            else:
+                self.current_status = "GOING_TO_HOME"
+                self.state_start_time = now
+                self.get_logger().info("No pending orders, heading home")
+        
+        # Going home
+        elif self.current_status == "GOING_TO_HOME":
+            if elapsed >= HOME_RETURN_SEC:
+                self.current_status = "IDLE_AT_HOME"
+                self.state_start_time = now
+                self.get_logger().info("Reached home, ready for new orders")
+
 
         # Going to table
         elif self.current_status.startswith("GOING_TO_"):
@@ -92,12 +101,28 @@ class ButlerTaskManager(Node):
                 self.state_start_time = now
                 self.get_logger().info(f"Reached {self.current_table}")
 
+        # At table
+        elif self.current_status.startswith("AT_"):
+            if elapsed >= TABLE_DWELL_SEC:
+                if self.order_queue:
+                    self.current_table = self.order_queue.popleft()
+                    self.current_status = f"GOING_TO_{self.current_table.upper()}"
+                    self.state_start_time = now
+                    self.get_logger().info(f"Proceeding to next table: {self.current_table}")
+                else:
+                    self.current_status = "GOING_TO_KITCHEN"
+                    self.current_table = None
+                    self.state_start_time = now
+                    self.get_logger().info("All deliveries done, returning to kitchen")
+
+        
 
 def main(args=None):
     rclpy.init(args=args)
-    node= ButlerTaskManager()
+    node = ButlerTaskManager()
     rclpy.spin(node)
     rclpy.shutdown()
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
