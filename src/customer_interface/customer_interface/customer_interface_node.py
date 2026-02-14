@@ -4,10 +4,14 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 
+VALID_TABLES = ["table1", "table2", "table3"]
+
+
 class CustomerInterface(Node):
     def __init__(self):
         super().__init__('customer_interface')
 
+        #publisher
         self.order_pub = self.create_publisher(String, '/orders', 10)
         self.cancel_pub = self.create_publisher(String, '/cancel_order', 10)
 
@@ -22,22 +26,47 @@ class CustomerInterface(Node):
             print("2. Cancel Order")
             choice = input("Select option: ")
 
+            # ---------- PLACE ORDER ----------
             if choice == "1":
-                table = input("Enter table (table1/table2/table3): ")
-                msg = String()
-                msg.data = table
-                self.order_pub.publish(msg)
-                print(f"Order placed for {table}")
+                table_input = input(
+                    "Enter table(s) (table1,table2,table3): "
+                )
 
+                tables = [t.strip() for t in table_input.split(",") if t.strip()]
+                invalid_tables = [t for t in tables if t not in VALID_TABLES]
+
+                if not tables:
+                    print("❌ No table entered")
+                    continue
+
+                if invalid_tables:
+                    print(f"❌ Invalid table(s): {invalid_tables}")
+                    print("✅ Valid options: table1, table2, table3")
+                    continue
+
+                msg = String()
+                msg.data = ",".join(tables)
+                self.order_pub.publish(msg)
+
+                print(f"✅ Order placed for: {tables}")
+
+            # ---------- CANCEL ORDER ----------
             elif choice == "2":
-                table = input("Enter table to cancel: ")
+                table = input("Enter table to cancel (table1/table2/table3): ").strip()
+
+                if table not in VALID_TABLES:
+                    print(f"❌ Invalid table: {table}")
+                    print("✅ Valid options: table1, table2, table3")
+                    continue
+
                 msg = String()
                 msg.data = table
                 self.cancel_pub.publish(msg)
-                print(f"Order cancelled for {table}")
+
+                print(f"✅ Order cancelled for {table}")
 
             else:
-                print("Invalid option")
+                print("❌ Invalid option (choose 1 or 2)")
 
 
 def main():

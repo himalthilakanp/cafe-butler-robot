@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -7,8 +8,11 @@ from turtlesim.msg import Pose
 from collections import deque
 import math
 
-TABLE_DWELL_SEC = 5.0
-HOME_RETURN_SEC = 4.0
+
+# ---------------- CONFIG ---------------- #
+
+TABLE_DWELL_SEC = 2.0
+KITCHEN_TIMEOUT = 5.0
 
 HOME = (5.5, 5.5)
 KITCHEN = (9.0, 9.0)
@@ -20,87 +24,110 @@ TABLES = {
 }
 
 
+# ---------------- NODE ---------------- #
+
 class ButlerTaskManager(Node):
 
     def __init__(self):
         super().__init__("butler_task_manager")
 
         # Publishers
-        self.status_pub = self.create_publisher(String, "/amr_status", 10)
         self.cmd_pub = self.create_publisher(Twist, "/turtle1/cmd_vel", 10)
+        self.status_pub = self.create_publisher(String, "/amr_status", 10)
 
         # Subscribers
         self.create_subscription(String, "/orders", self.order_callback, 10)
         self.create_subscription(String, "/cancel_order", self.cancel_callback, 10)
+        self.create_subscription(String, "/kitchen_confirm", self.kitchen_confirm_callback, 10)
         self.create_subscription(Pose, "/turtle1/pose", self.pose_callback, 10)
 
-        # FSM state
-        self.current_status = "IDLE_AT_HOME"
+        # FSM
+        self.state = "IDLE"
         self.order_queue = deque()
         self.current_table = None
         self.current_pose = None
 
-        # Cancel flags
-        self.cancel_requested = False
-        self.cancel_table = None
+        self.kitchen_confirmed = False
+        self.initial_collection_done = False
+        self.cancel_happened = False
 
         # Timers
-        self.create_timer(0.1, self.handle_movement)
+        self.create_timer(0.05, self.control_loop)
         self.create_timer(2.0, self.publish_status)
 
-        self.state_start_time = self.get_clock().now()
-        self.get_logger().info("Butler Task Manager started")
+        self.get_logger().info("🚀 Butler Task Manager Started")
 
-    # ---------------- Callbacks ----------------
+
+    # ---------------- CALLBACKS ---------------- #
 
     def pose_callback(self, msg):
         self.current_pose = msg
 
-    def order_callback(self, msg):
-        self.get_logger().info(f"Order received: {msg.data}")
 
+    def order_callback(self, msg):
         tables = [t.strip().lower() for t in msg.data.split(",") if t.strip()]
+
         for table in tables:
             if table in TABLES:
                 self.order_queue.append(table)
+                self.get_logger().info(f"📝 Added {table}")
             else:
-                self.get_logger().warn(f"Unknown table: {table}")
+                self.get_logger().warn(f"Invalid table: {table}")
 
-        if self.current_status == "IDLE_AT_HOME":
-            self.current_status = "GOING_TO_KITCHEN"
-            self.state_start_time = self.get_clock().now()
+        if self.state == "IDLE" and self.order_queue:
+            self.state = "GOING_TO_KITCHEN"
+            self.initial_collection_done = False
+            self.get_logger().info("➡ GOING_TO_KITCHEN")
+
 
     def cancel_callback(self, msg):
         table = msg.data.strip().lower()
-        self.get_logger().info(f"Cancellation received for: {table}")
+        self.get_logger().info(f"❌ Cancel request for {table}")
+        self.cancel_happened = True
 
-        # Remove from pending queue
+
+        # Remove from queue
         self.order_queue = deque(t for t in self.order_queue if t != table)
 
-        # Cancel current table if active
+        # If currently delivering this table → skip immediately
         if self.current_table == table:
-            self.cancel_requested = True
-            self.cancel_table = table
+            self.current_table = None
+            if self.order_queue:
+                self.current_table = self.order_queue.popleft()
+                self.state = "GOING_TO_TABLE"
+                self.get_logger().info(f"➡ Skipping cancelled → Going to {self.current_table}")
+            else:
+                self.state = "GOING_TO_KITCHEN"
+                self.get_logger().info("↩ No more tables → Returning to Kitchen")
+
+
+    def kitchen_confirm_callback(self, msg):
+        if msg.data.lower() == "ready":
+            self.kitchen_confirmed = True
+            self.get_logger().info("✅ Kitchen Confirmed")
+
 
     def publish_status(self):
         msg = String()
-        msg.data = f"{self.current_status} | Pending orders: {len(self.order_queue)}"
+        msg.data = f"{self.state} | Pending: {len(self.order_queue)}"
         self.status_pub.publish(msg)
-        self.get_logger().info(msg.data)
 
-    # ---------------- Motion ----------------
+
+    # ---------------- MOVEMENT ---------------- #
 
     def move_to(self, target):
+
         if self.current_pose is None:
-            return
+            return False
 
         dx = target[0] - self.current_pose.x
         dy = target[1] - self.current_pose.y
-        distance = math.sqrt(dx * dx + dy * dy)
+        distance = math.sqrt(dx*dx + dy*dy)
 
         cmd = Twist()
 
-        if distance > 0.15:
+        if distance > 0.2:
+
             goal_theta = math.atan2(dy, dx)
             diff = goal_theta - self.current_pose.theta
 
@@ -110,64 +137,106 @@ class ButlerTaskManager(Node):
                 diff += 2 * math.pi
 
             cmd.linear.x = min(2.0, distance)
-            cmd.angular.z = 4.0 * diff
+            cmd.angular.z = 6.0 * diff
         else:
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
+            self.cmd_pub.publish(cmd)
+            return True
 
         self.cmd_pub.publish(cmd)
+        return False
 
-    # ---------------- FSM ----------------
 
-    def handle_movement(self):
-        now = self.get_clock().now()
-        elapsed = (now - self.state_start_time).nanoseconds / 1e9
+    # ---------------- FSM ---------------- #
 
-        # Cancel while going to table → go back to kitchen
-        if self.cancel_requested and self.current_status.startswith("GOING_TO_"):
-            self.get_logger().info("Order cancelled while going to table, returning to kitchen")
-            self.current_table = None
-            self.current_status = "GOING_TO_KITCHEN"
-            self.cancel_requested = False
-            self.state_start_time = now
+    def control_loop(self):
+
+        if self.current_pose is None:
             return
 
-        if self.current_status == "GOING_TO_KITCHEN":
-            self.move_to(KITCHEN)
-            if elapsed >= 5.0:
-                self.current_status = "AT_KITCHEN"
-                self.state_start_time = now
+        now = self.get_clock().now()
 
-        elif self.current_status == "AT_KITCHEN":
-            if self.order_queue:
-                self.current_table = self.order_queue.popleft()
-                self.current_status = f"GOING_TO_{self.current_table.upper()}"
-            else:
-                self.current_status = "GOING_TO_HOME"
-            self.state_start_time = now
+        # ---- GOING TO KITCHEN ---- #
+        if self.state == "GOING_TO_KITCHEN":
 
-        elif self.current_status.startswith("GOING_TO_") and self.current_table:
-            self.move_to(TABLES[self.current_table])
-            if elapsed >= 4.0:
-                self.current_status = f"AT_{self.current_table.upper()}"
-                self.state_start_time = now
+            if self.move_to(KITCHEN):
+                self.state = "AT_KITCHEN"
+                self.kitchen_timer = now
 
-        elif self.current_status.startswith("AT_"):
-            if elapsed >= TABLE_DWELL_SEC:
+                if not self.initial_collection_done:
+                    self.kitchen_confirmed = False
+                    self.get_logger().info("➡ AT_KITCHEN (Waiting confirmation)")
+                else:
+                    if self.cancel_happened:
+                        self.get_logger().info("Cancel detected  Staying at kitchen")
+                        self.cancel_happened = False
+                        self.state = "AT_KITCHEN"
+                        
+                    else:    
+                        self.get_logger().info("↩ Back to kitchen after deliveries")
+                        self.state = "GOING_HOME"
+
+
+        # ---- AT KITCHEN ---- #
+        elif self.state == "AT_KITCHEN":
+
+            elapsed = (now - self.kitchen_timer).nanoseconds / 1e9
+
+            if self.kitchen_confirmed:
+                self.kitchen_confirmed = False
+                self.initial_collection_done = True
+
                 if self.order_queue:
                     self.current_table = self.order_queue.popleft()
-                    self.current_status = f"GOING_TO_{self.current_table.upper()}"
+                    self.state = "GOING_TO_TABLE"
+                    self.get_logger().info(f"➡ GOING_TO_TABLE ({self.current_table})")
+                else:
+                    self.state = "GOING_HOME"
+
+            elif elapsed > KITCHEN_TIMEOUT:
+                self.get_logger().warn("⏳ Kitchen Timeout")
+                self.state = "GOING_HOME"
+
+
+        # ---- GOING TO TABLE ---- #
+        elif self.state == "GOING_TO_TABLE":
+
+            target = TABLES[self.current_table]
+
+            if self.move_to(target):
+                self.state = "AT_TABLE"
+                self.table_timer = now
+                self.get_logger().info(f"🍽 AT_TABLE ({self.current_table})")
+
+
+        # ---- AT TABLE ---- #
+        elif self.state == "AT_TABLE":
+
+            elapsed = (now - self.table_timer).nanoseconds / 1e9
+
+            if elapsed > TABLE_DWELL_SEC:
+
+                if self.order_queue:
+                    self.current_table = self.order_queue.popleft()
+                    self.state = "GOING_TO_TABLE"
+                    self.get_logger().info(f"➡ GOING_TO_TABLE ({self.current_table})")
                 else:
                     self.current_table = None
-                    self.current_status = "GOING_TO_HOME"
-                self.state_start_time = now
+                    self.state = "GOING_TO_KITCHEN"
+                    self.get_logger().info("↩ All deliveries done → Kitchen before Home")
 
-        elif self.current_status == "GOING_TO_HOME":
-            self.move_to(HOME)
-            if elapsed >= HOME_RETURN_SEC:
-                self.current_status = "IDLE_AT_HOME"
-                self.state_start_time = now
 
+        # ---- GOING HOME ---- #
+        elif self.state == "GOING_HOME":
+
+            if self.move_to(HOME):
+                self.state = "IDLE"
+                self.initial_collection_done = False
+                self.get_logger().info("🏠 IDLE")
+
+
+# ---------------- MAIN ---------------- #
 
 def main():
     rclpy.init()
