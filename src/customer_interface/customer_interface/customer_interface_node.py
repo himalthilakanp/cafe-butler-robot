@@ -8,10 +8,11 @@ VALID_TABLES = ["table1", "table2", "table3"]
 
 
 class CustomerInterface(Node):
+
     def __init__(self):
         super().__init__('customer_interface')
 
-        #publisher
+        # publisher
         self.order_pub = self.create_publisher(String, '/orders', 10)
         self.cancel_pub = self.create_publisher(String, '/cancel_order', 10)
 
@@ -20,14 +21,18 @@ class CustomerInterface(Node):
         self.run_cli()
 
     def run_cli(self):
+
         while rclpy.ok():
+
             print("\n--- Cafe Order System ---")
             print("1. Place Order")
             print("2. Cancel Order")
+
             choice = input("Select option: ")
 
             # ---------- PLACE ORDER ----------
             if choice == "1":
+
                 table_input = input(
                     "Enter table(s) (table1,table2,table3): "
                 )
@@ -52,7 +57,10 @@ class CustomerInterface(Node):
 
             # ---------- CANCEL ORDER ----------
             elif choice == "2":
-                table = input("Enter table to cancel (table1/table2/table3): ").strip()
+
+                table = input(
+                    "Enter table to cancel (table1/table2/table3): "
+                ).strip()
 
                 if table not in VALID_TABLES:
                     print(f"❌ Invalid table: {table}")

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 import threading
 
 
-class KitchenInterface(Node):
+class DeliveryInterface(Node):
 
     def __init__(self):
-        super().__init__('kitchen_interface')
+        super().__init__('delivery_interface')
 
         self.create_subscription(
             String,
@@ -19,59 +20,55 @@ class KitchenInterface(Node):
 
         self.confirm_pub = self.create_publisher(
             String,
-            "/kitchen_confirm",
+            "/customer_confirm",
             10
         )
 
         self.waiting_for_confirm = False
 
-        self.get_logger().info(" Kitchen Interface Started")
+        self.get_logger().info("📦 Delivery Interface Started")
 
-    # ------------------------------------------
 
     def status_callback(self, msg):
 
-        # Only trigger when robot JUST reaches kitchen
-        if msg.data.startswith("AT_KITCHEN"):
+        if msg.data.startswith("AT_TABLE:"):
 
             if not self.waiting_for_confirm:
 
                 self.waiting_for_confirm = True
 
-                print("\n Robot reached kitchen.")
-                print("Type 'ready' and press Enter to confirm.")
+                table_name = msg.data.split(":")[1].split("|")[0].strip()
+
+                print(f"\n🍽 Robot reached {table_name}.")
+                print("Type 'received' and press Enter to confirm delivery.")
 
                 threading.Thread(
                     target=self.wait_for_input,
                     daemon=True
                 ).start()
 
-    # ------------------------------------------
 
     def wait_for_input(self):
 
         user_input = input()
 
-        if user_input.strip().lower() == "ready":
+        if user_input.strip().lower() == "received":
 
             msg = String()
-            msg.data = "ready"
+            msg.data = "received"
             self.confirm_pub.publish(msg)
 
-            print(" Kitchen confirmed")
+            print("✅ Delivery confirmed")
 
         else:
-            print(" Invalid input")
+            print("❌ Invalid input")
 
-        # Always reset
         self.waiting_for_confirm = False
 
 
-# ------------------------------------------
-
 def main():
     rclpy.init()
-    node = KitchenInterface()
+    node = DeliveryInterface()
     rclpy.spin(node)
     rclpy.shutdown()
 

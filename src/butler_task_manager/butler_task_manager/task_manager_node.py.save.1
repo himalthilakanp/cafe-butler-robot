@@ -11,7 +11,7 @@ import math
 
 # ---------------- CONFIG ---------------- #
 
-TABLE_TIMEOUT = 8.0
+TABLE_DWELL_TIMEOUT = 8.0
 KITCHEN_TIMEOUT = 5.0
 
 HOME = (5.5, 5.5)
@@ -23,6 +23,8 @@ TABLES = {
     "table3": (2.0, 2.0),
 }
 
+
+# ---------------- NODE ---------------- #
 
 class ButlerTaskManager(Node):
 
@@ -40,7 +42,7 @@ class ButlerTaskManager(Node):
         self.create_subscription(String, "/customer_confirm", self.customer_confirm_callback, 10)
         self.create_subscription(Pose, "/turtle1/pose", self.pose_callback, 10)
 
-        # FSM variables
+        # FSM
         self.state = "IDLE"
         self.order_queue = deque()
         self.current_table = None
@@ -48,7 +50,7 @@ class ButlerTaskManager(Node):
 
         self.kitchen_confirmed = False
         self.customer_confirmed = False
-        self.recovery_required = False
+        self.initial_collection_done = False
 
         # Timers
         self.create_timer(0.05, self.control_loop)
@@ -74,8 +76,8 @@ class ButlerTaskManager(Node):
                 self.get_logger().warn(f"Invalid table: {table}")
 
         if self.state == "IDLE" and self.order_queue:
-            self.recovery_required = False
             self.state = "GOING_TO_KITCHEN"
+            self.initial_collection_done = False
             self.get_logger().info("➡ GOING_TO_KITCHEN")
 
 
@@ -83,18 +85,14 @@ class ButlerTaskManager(Node):
         table = msg.data.strip().lower()
         self.get_logger().info(f"❌ Cancel request for {table}")
 
-        # Remove from remaining queue only
+        # Remove cancelled table from queue
         self.order_queue = deque(t for t in self.order_queue if t != table)
 
-        # If cancelling the active table
+        # If currently serving that table
         if self.current_table == table:
-            self.get_logger().info("⚠ Cancelling active delivery")
+            self.get_logger().info("⚠ Current table cancelled")
             self.current_table = None
-            self.recovery_required = True
             self.state = "GOING_TO_KITCHEN"
-
-        else:
-            self.recovery_required = True
 
 
     def kitchen_confirm_callback(self, msg):
@@ -109,16 +107,9 @@ class ButlerTaskManager(Node):
             self.get_logger().info("✅ Customer Confirmed Delivery")
 
 
-    # ---------------- STATUS ---------------- #
-
     def publish_status(self):
         msg = String()
-
-        if self.state == "AT_TABLE" and self.current_table:
-            msg.data = f"AT_TABLE:{self.current_table} | Pending: {len(self.order_queue)}"
-        else:
-            msg.data = f"{self.state} | Pending: {len(self.order_queue)}"
-
+        msg.data = f"{self.state} | Pending: {len(self.order_queue)}"
         self.status_pub.publish(msg)
 
 
@@ -131,11 +122,12 @@ class ButlerTaskManager(Node):
 
         dx = target[0] - self.current_pose.x
         dy = target[1] - self.current_pose.y
-        distance = math.sqrt(dx * dx + dy * dy)
+        distance = math.sqrt(dx*dx + dy*dy)
 
         cmd = Twist()
 
         if distance > 0.2:
+
             goal_theta = math.atan2(dy, dx)
             diff = goal_theta - self.current_pose.theta
 
@@ -165,7 +157,7 @@ class ButlerTaskManager(Node):
 
         now = self.get_clock().now()
 
-        # GOING TO KITCHEN
+        # ---- GOING TO KITCHEN ---- #
         if self.state == "GOING_TO_KITCHEN":
 
             if self.move_to(KITCHEN):
@@ -175,33 +167,44 @@ class ButlerTaskManager(Node):
                 self.get_logger().info("➡ AT_KITCHEN (Waiting confirmation)")
 
 
-        # AT KITCHEN
-        elif self.state == "AT_KITCHEN":
+        # ---- AT TABLE ---- #
+elif self.state == "AT_TABLE":
 
-            elapsed = (now - self.kitchen_timer).nanoseconds / 1e9
+    elapsed = (now - self.table_timer).nanoseconds / 1e9
 
-            if self.kitchen_confirmed:
-                self.kitchen_confirmed = False
+    # ----- If customer confirms -----
+    if self.customer_confirmed:
 
-                if len(self.order_queue) > 0:
-                    self.current_table = self.order_queue.popleft()
-                    self.state = "GOING_TO_TABLE"
-                    self.get_logger().info(f"➡ GOING_TO_TABLE ({self.current_table})")
-                else:
-                    self.state = "GOING_HOME"
+        self.customer_confirmed = False
 
-            elif elapsed > KITCHEN_TIMEOUT:
-                self.get_logger().warn("⏳ Kitchen Timeout")
-                self.recovery_required = True
-                self.state = "GOING_HOME"
+        if self.order_queue:
+            self.current_table = self.order_queue.popleft()
+            self.state = "GOING_TO_TABLE"
+            self.get_logger().info(f"➡ GOING_TO_TABLE ({self.current_table})")
+        else:
+            self.current_table = None
+            self.state = "GOING_TO_KITCHEN"
+            self.get_logger().info("↩ Final table done → Kitchen before Home")
+
+    # ----- If no confirmation (timeout) -----
+    elif elapsed > 8.0:
+
+        self.get_logger().warn("Customer confirmation timeout")
+
+        if self.order_queue:
+            # Skip table and go to next
+            self.current_table = self.order_queue.popleft()
+            self.state = "GOING_TO_TABLE"
+            self.get_logger().info(f"Skipping → GOING_TO_TABLE ({self.current_table})")
+        else:
+            # Single order OR last table
+            self.current_table = None
+            self.state = "GOING_TO_KITCHEN"
+            self.get_logger().info("Timeout on last table → Kitchen before Home")
 
 
-        # GOING TO TABLE
+        # ---- GOING TO TABLE ---- #
         elif self.state == "GOING_TO_TABLE":
-
-            if self.current_table is None:
-                self.state = "GOING_HOME"
-                return
 
             target = TABLES[self.current_table]
 
@@ -212,52 +215,48 @@ class ButlerTaskManager(Node):
                 self.get_logger().info(f"🍽 AT_TABLE ({self.current_table})")
 
 
-        # AT TABLE
+        # ---- AT TABLE ---- #
         elif self.state == "AT_TABLE":
 
             elapsed = (now - self.table_timer).nanoseconds / 1e9
 
-            # SUCCESS
+            # If customer confirms
             if self.customer_confirmed:
 
-                self.customer_confirmed = False
-
-                if len(self.order_queue) > 0:
+                if self.order_queue:
                     self.current_table = self.order_queue.popleft()
                     self.state = "GOING_TO_TABLE"
                     self.get_logger().info(f"➡ GOING_TO_TABLE ({self.current_table})")
-
-                else:
-                    self.current_table = None
-
-                    if self.recovery_required:
-                        self.state = "GOING_TO_KITCHEN"
-                        self.get_logger().info("⚠ Recovery → Kitchen before Home")
-                    else:
-                        self.state = "GOING_HOME"
-                        self.get_logger().info("🏁 Delivery complete → Going Home")
-
-            # TIMEOUT
-            elif elapsed > TABLE_TIMEOUT:
-
-                self.get_logger().warn("⏳ Customer confirmation timeout")
-                self.recovery_required = True
-
-                if len(self.order_queue) > 0:
-                    self.current_table = self.order_queue.popleft()
-                    self.state = "GOING_TO_TABLE"
                 else:
                     self.current_table = None
                     self.state = "GOING_TO_KITCHEN"
+                    self.get_logger().info("↩ Final table done → Kitchen before Home")
+
+            # If timeout
+            elif elapsed > TABLE_DWELL_TIMEOUT:
+
+                self.get_logger().warn("⏳ Customer confirmation timeout")
+
+                if self.order_queue:
+                    self.current_table = self.order_queue.popleft()
+                    self.state = "GOING_TO_TABLE"
+                    self.get_logger().info(f"Skipping → GOING_TO_TABLE ({self.current_table})")
+                else:
+                    self.current_table = None
+                    self.state = "GOING_TO_KITCHEN"
+                    self.get_logger().info("Timeout on last table → Kitchen before Home")
 
 
-        # GOING HOME
+        # ---- GOING HOME ---- #
         elif self.state == "GOING_HOME":
 
             if self.move_to(HOME):
                 self.state = "IDLE"
+                self.initial_collection_done = False
                 self.get_logger().info("🏠 IDLE")
 
+
+# ---------------- MAIN ---------------- #
 
 def main():
     rclpy.init()
